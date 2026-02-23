@@ -1,0 +1,21 @@
+<connections>
+    <!-- West Incoming -->
+    <connection from="W_in" to="S_out" fromLane="0" toLane="0"/> <!-- Right Turn -->
+    <connection from="W_in" to="E_out" fromLane="1" toLane="1"/> <!-- Straight -->
+    <connection from="W_in" to="N_out" fromLane="2" toLane="2"/> <!-- Left Turn -->
+
+    <!-- East Incoming -->
+    <connection from="E_in" to="N_out" fromLane="0" toLane="0"/> <!-- Right Turn -->
+    <connection from="E_in" to="W_out" fromLane="1" toLane="1"/> <!-- Straight -->
+    <connection from="E_in" to="S_out" fromLane="2" toLane="2"/> <!-- Left Turn -->
+
+    <!-- North Incoming -->
+    <connection from="N_in" to="W_out" fromLane="0" toLane="0"/> <!-- Right Turn -->
+    <connection from="N_in" to="S_out" fromLane="1" toLane="1"/> <!-- Straight -->
+    <connection from="N_in" to="E_out" fromLane="2" toLane="2"/> <!-- Left Turn -->
+
+    <!-- South Incoming -->
+    <connection from="S_in" to="E_out" fromLane="0" toLane="0"/> <!-- Right Turn -->
+    <connection from="S_in" to="N_out" fromLane="1" toLane="1"/> <!-- Straight -->
+    <connection from="S_in" to="W_out" fromLane="2" toLane="2"/> <!-- Left Turn -->
+</connections>

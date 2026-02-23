@@ -1,0 +1,43 @@
+<routes>
+    <!-- Vehicle Type Definition -->
+    <vType id="connected_car" accel="3.0" decel="4.5" sigma="0" length="5" minGap="2.5" maxSpeed="20" carFollowModel="Krauss" laneChangeModel="LC2013" color="yellow"/>
+
+    <!-- Routes Definition -->
+    <route id="W_E" edges="W_in E_out" />
+    <route id="W_N" edges="W_in N_out" />
+    <route id="W_S" edges="W_in S_out" />
+
+    <route id="E_W" edges="E_in W_out" />
+    <route id="E_N" edges="E_in N_out" />
+    <route id="E_S" edges="E_in S_out" />
+
+    <route id="N_S" edges="N_in S_out" />
+    <route id="N_E" edges="N_in E_out" />
+    <route id="N_W" edges="N_in W_out" />
+
+    <route id="S_N" edges="S_in N_out" />
+    <route id="S_E" edges="S_in E_out" />
+    <route id="S_W" edges="S_in W_out" />
+
+    <!-- Continuous Flow Definition -->
+    <!-- West Approach: 3 lanes with different turn directions -->
+    <flow id="flow_W_S" type="connected_car" route="W_S" begin="0" end="1e9" vehsPerHour="120" departLane="0" departSpeed="max" />
+    <flow id="flow_W_E" type="connected_car" route="W_E" begin="0" end="1e9" vehsPerHour="120" departLane="1" departSpeed="max" />
+    <flow id="flow_W_N" type="connected_car" route="W_N" begin="0" end="1e9" vehsPerHour="120" departLane="2" departSpeed="max" />
+
+    <!-- East Approach: 3 lanes with different turn directions -->
+    <flow id="flow_E_N" type="connected_car" route="E_N" begin="0" end="1e9" vehsPerHour="120" departLane="0" departSpeed="max" />
+    <flow id="flow_E_W" type="connected_car" route="E_W" begin="0" end="1e9" vehsPerHour="120" departLane="1" departSpeed="max" />
+    <flow id="flow_E_S" type="connected_car" route="E_S" begin="0" end="1e9" vehsPerHour="120" departLane="2" departSpeed="max" />
+
+    <!-- North Approach: 3 lanes with different turn directions -->
+    <flow id="flow_N_W" type="connected_car" route="N_W" begin="0" end="1e9" vehsPerHour="120" departLane="0" departSpeed="max" />
+    <flow id="flow_N_S" type="connected_car" route="N_S" begin="0" end="1e9" vehsPerHour="120" departLane="1" departSpeed="max" />
+    <flow id="flow_N_E" type="connected_car" route="N_E" begin="0" end="1e9" vehsPerHour="120" departLane="2" departSpeed="max" />
+
+    <!-- South Approach: 3 lanes with different turn directions -->
+    <flow id="flow_S_E" type="connected_car" route="S_E" begin="0" end="1e9" vehsPerHour="120" departLane="0" departSpeed="max" />
+    <flow id="flow_S_N" type="connected_car" route="S_N" begin="0" end="1e9" vehsPerHour="120" departLane="1" departSpeed="max" />
+    <flow id="flow_S_W" type="connected_car" route="S_W" begin="0" end="1e9" vehsPerHour="120" departLane="2" departSpeed="max" />
+
+</routes>
