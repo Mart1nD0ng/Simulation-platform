@@ -1,0 +1,56 @@
+# 数字孪生与PBFT共识仿真启动指南 (Operating Manual)
+
+## 🔄 核心模块交互级通信逻辑 (Architecture Logic)
+
+为了兼顾 Veins 原生架构的连通性，以及外部数字孪生系统的强接入，系统被设计为了三层：
+
+ **1. 启动协调层 ( sumo-launchd & TraCI 多路连接 )**
+   - **后台驻留程序**：我们首先需要启动旧版的 `sumo-launchd.py` 脚本，让它监听在稳定的 `9999` 端口。它是用来“代为唤醒” SUMO 实例的管家。
+   - 然后，OMNeT++ 会作为 **Client #1** 去请求这个管家，管家会通过配置好的 `erlangen.launchd.xml` 带有 `--num-clients 2` 参数的方式，去动态开辟一个自由端口并拉起 `sumo-gui`。
+   - 接着，我们的 Python 桥接脚本当作 **Client #2**：它利用了 `psutil` 智能扫描电脑中是否有唤醒的 `sumo-gui` 进程，并自动挖掘、对接上了这个动态端口！
+
+ **2. PBFT 共识应用层 ( C++ / OMNeT++ )**
+   - 在底层的 Veins 中，车辆的应用程序 (`MyVeinsApp.cc`) 每秒计算周围链路的 **LET (Link Expiration Time)**。
+   - 车辆使用 PBFT 协议执行智能红绿灯协调，并选举高 LET 节点作为 `Cluster Head`。
+   - 所有结算出的状态指标，OMNeT++ 都会通过底层的 **UDP Socket (端口 8766)** 不断地、单向推送到外网去。
+
+ **3. UI 桥接层与数字孪生 ( Python Bridge & 前端画布 )**
+   - `sumo_bridge.py` 中挂载了异步任务 `udp_listener` 持续接收 **8766 端口**。
+   - 它直接向自己连上的 TraCI 管道发令控制红绿灯颜色，并将交通流状态与共识 JSON 包通过 **WebSocket (默认 55130)** 定频向前端画布广播。
+   - `index.html` 前端画布以 30FPS 进行动画平滑插值，渲染红绿灯与 LET 拓扑特效。
+
+---
+
+## 🚀 启动完整仿真流程详解
+
+请务必严格按照此顺序启动，以保证两边都能正确通过 `sumo-launchd.py` 握手。
+
+### **步骤一：启动基础服务器 (sumo-launchd)**
+打开第一个终端（通常是 OMNeT++ 环境自带的 MingwEnv 命令提示符），启动 Veins 提供的中转服务器脚本：
+```bash
+python /d/V2X_Project/veins-veins-5.3.1/sumo-launchd.py -vv -c D:/V2X_Project/sumo-1.8.0/bin/sumo-gui.exe
+```
+> **提示**：此时命令行会显示 "Listening on port 9999"，等待仿真指令接入。
+
+### **步骤二：启动前端数字孪生看板**
+打开第二个普通终端，进入到前端资源的目录，并搭建起轻量级 Web 服务器：
+```bash
+cd frontend
+python -m http.server 8000
+```
+> **提示**：现在你可以在浏览器中访问 `http://localhost:8000` 并将左侧 websocket 端口设置为 `55130`，点击 "Connect SUMO"（目前会显示黑屏等待连接）。
+
+### **步骤三：从 OMNeT++ 发射主控仿真实例**
+在 OMNeT++ IDE 里面：
+1. 请确保你修改过的 `MyVeinsApp.cc` / `omnetpp.ini` 工程已被全部正常编译 (`Project -> Build All`)。
+2. 展开项目目录 `crossroad/`，选中 `omnetpp.ini`，右键点击选择 **"Run As" -> "OMNeT++ Simulation"**。
+3. （如果你使用命令行，可以在终端中进入 `crossroad` 然后执行 `./run -c Default`）
+> **提示**：当你点击 run 开始跑时间的瞬间，**刚才步骤一**的 `launchd` 会弹出一个带有路网的 `sumo-gui` 窗口。**注意！它会自动卡住在 0 步不走**，因为它在等待 Client #2（即我们的 Python 桥）连接。
+
+### **步骤四：启动 Python Bridge 将系统缝合 ( 关键✨ )**
+打开最后第三个终端，进入到前端资源的目录，启动 Python 桥并指定目标前端渲染端口 55130。
+```bash
+cd frontend
+python sumo_bridge.py --config ../Strategy/crossroad.sumocfg --port 55130
+```
+> **终局**：一旦按下回车，这支脚本会“满世界寻找”刚才被弹出的 SUMO 进程，成功捕获其临时端口后连入（并在控制台打钩✅）。此时，SUMO 的时间和画面全部解锁流转。打开网页前端，数据开始流动！所有的红蓝光晕和绿波都将展现在你的眼前！
