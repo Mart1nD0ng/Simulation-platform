@@ -32,6 +32,23 @@
 #include <vector>
 #include <algorithm>
 #include <functional>
+#include <map>
+#include <set>
+#include <string>
+
+// Include Windows Socket if needed or POSIX socket
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#endif
+
+#include "json.hpp"
+using json = nlohmann::json;
 
 using namespace omnetpp;
 
@@ -68,6 +85,33 @@ enum class VehicleState {
     WAITING,      ///< Vehicle is stopped or waiting before the stop line
     PASSING,      ///< Vehicle is actively crossing the intersection
     EXITED        ///< Vehicle has passed the conflict zone
+};
+
+/**
+ * @brief Node roles in PBFT consensus
+ */
+enum class NodeRole {
+    REPLICA,
+    CLUSTER_HEAD
+};
+
+/**
+ * @brief Node honest/malicious state
+ */
+enum class NodeState {
+    HONEST,
+    MALICIOUS
+};
+
+/**
+ * @brief PBFT States
+ */
+enum class PBFTPhase {
+    IDLE,
+    PRE_PREPARE,
+    PREPARE,
+    COMMIT,
+    REPLY
 };
 
 /**
@@ -108,13 +152,17 @@ struct Observation {
  */
 struct NeighborInfo {
     LAddress::L2Type address;
+    std::string idStr; // String identifier derived from address/TraCI for JSON
     Coord position;
     Coord speed;
+    Coord heading; // For LET calculation
     simtime_t lastUpdate;
     
     NeighborInfo(LAddress::L2Type addr, Coord pos, Coord spd, simtime_t time)
         : address(addr), position(pos), speed(spd), lastUpdate(time)
-    {}
+    {
+        idStr = "veh" + std::to_string(addr); // Simple ID conversion mapping
+    }
 };
 
 class VEINS_API MyVeinsApp : public DemoBaseApplLayer {
@@ -180,6 +228,38 @@ protected:
      * @param action Action to apply
      */
     void applyActionToVehicle(VehicleAction action);
+
+    // ========== PBFT & LET Core Functions ==========
+
+    /**
+     * @brief Execute LET calculations periodically
+     */
+    void updateLETAndClustering();
+
+    /**
+     * @brief Calculate Link Expiration Time (LET) between two vehicles
+     */
+    double calculateLET(Coord pos1, Coord spd1, Coord pos2, Coord spd2, double R);
+
+    /**
+     * @brief Evaluate the Queue Weight
+     */
+    double calculateQueueWeight();
+
+    /**
+     * @brief Execute a step in the PBFT State Machine
+     */
+    void stepPBFT();
+
+    /**
+     * @brief Check for View Change Condition (Primary Left)
+     */
+    void checkViewChange();
+
+    /**
+     * @brief Serialize and send PBFT data through UDP socket
+     */
+    void sendDataToPythonBridge(json payload);
 
     // ========== Helper Functions ==========
     
@@ -250,6 +330,43 @@ protected:
     
     // Signal IDs for statistics
     simsignal_t vehicleStateSignal;
+    
+    // ========== PBFT and Architecture State ==========
+
+    // UDP Socket definition
+#ifdef _WIN32
+    SOCKET udpSocket;
+    struct sockaddr_in serverAddr;
+#else
+    int udpSocket;
+    struct sockaddr_in serverAddr;
+#endif
+
+    // PBFT Current State
+    PBFTPhase pbftPhase;
+    NodeRole nodeRole;
+    NodeState nodeState;
+    std::string currentProposalDir;
+    
+    // Cluster & Validation Data
+    std::string primaryNodeId;
+    std::map<std::string, std::string> votes; // NodeID -> Vote Direction
+    std::map<std::string, double> letScores; // DestID -> LET Score
+
+    simtime_t lastLetCalcTime;
+    simtime_t letCalcInterval;
+    double communicationRadius;
+    
+    simtime_t pbftPhaseStartTime;
+    bool faultyBehaviorEnabled;
+
+    cMessage* letTimer;
+    cMessage* pbftTimer;
+    
+    // Performance Metrics
+    simtime_t decisionLatencyMs;
+    double topologyStabilityScore;
+    double expectedThroughputGainPct;
 };
 
 } // namespace veins
