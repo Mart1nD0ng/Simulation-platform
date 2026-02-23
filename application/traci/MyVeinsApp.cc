@@ -69,11 +69,15 @@ void MyVeinsApp::initialize(int stage)
 #else
         udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
 #endif
+#ifdef _WIN32
+        if (udpSocket != INVALID_SOCKET) {
+#else
         if (udpSocket >= 0) {
+#endif
             memset(&serverAddr, 0, sizeof(serverAddr));
             serverAddr.sin_family = AF_INET;
             serverAddr.sin_port = htons(8766); // Hardcoded UDP port to Python script
-            inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
+            serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
         }
 
         // Initialize statistics
@@ -126,11 +130,11 @@ void MyVeinsApp::finish()
     }
 
     // Close Socket
-    if (udpSocket >= 0) {
 #ifdef _WIN32
+    if (udpSocket != INVALID_SOCKET) {
         closesocket(udpSocket);
-        WSACleanup();
 #else
+    if (udpSocket >= 0) {
         close(udpSocket);
 #endif
     }
@@ -586,7 +590,7 @@ void MyVeinsApp::updateLETAndClustering() {
     for (const auto& neighbor : neighbors) {
         double dist = curPosition.distance(neighbor.position);
         if (dist <= communicationRadius) {
-            double let = calculateLET(curPosition, mobility->getSpeed() * Coord(cos(mobility->getAngleRad()), sin(mobility->getAngleRad())),
+            double let = calculateLET(curPosition, curSpeed,
                                        neighbor.position, neighbor.speed, communicationRadius);
             
             // Normalize LET to 0-100 for score mapping (heuristic max LET = 20s)
