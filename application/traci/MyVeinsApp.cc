@@ -46,20 +46,51 @@ void MyVeinsApp::initialize(int stage)
         intersectionCenter.y = par("intersectionCenterY");
         intersectionCenter.z = 0.0;
         
+        letCalcInterval = par("letCalcInterval");
+        communicationRadius = par("communicationRadius");
+        faultyBehaviorEnabled = par("faultyBehaviorEnabled");
+        
         // Initialize state machine
         state = VehicleState::APPROACHING;
         lastDecisionTime = simTime();
         
+        // Initialize PBFT variables
+        pbftPhase = PBFTPhase::IDLE;
+        nodeRole = NodeRole::REPLICA;
+        nodeState = (faultyBehaviorEnabled && uniform(0, 1) < 0.2) ? NodeState::MALICIOUS : NodeState::HONEST; // 20% malicious if enabled
+        currentProposalDir = "";
+        primaryNodeId = "";
+        
+        // Initialize socket
+#ifdef _WIN32
+        WSADATA wsaData;
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+        udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#else
+        udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
+#endif
+        if (udpSocket >= 0) {
+            memset(&serverAddr, 0, sizeof(serverAddr));
+            serverAddr.sin_family = AF_INET;
+            serverAddr.sin_port = htons(8766); // Hardcoded UDP port to Python script
+            inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
+        }
+
         // Initialize statistics
         stateTransitions = 0;
         totalWaitingTime = 0.0;
         waitingStartTime = 0.0;
+        decisionLatencyMs = 0;
+        topologyStabilityScore = 0.0;
+        expectedThroughputGainPct = 0.0;
         
         // Register signals for statistics
         vehicleStateSignal = registerSignal("vehicleState");
         
-        // Create decision timer
+        // Create timers
         decisionTimer = new cMessage("decisionTimer");
+        letTimer = new cMessage("letTimer");
+        pbftTimer = new cMessage("pbftTimer");
         
         EV_INFO << "MyVeinsApp initialized for vehicle " << myId 
                 << " with decision interval " << decisionInterval << "s" << endl;
@@ -69,6 +100,7 @@ void MyVeinsApp::initialize(int stage)
         // Note: mobility, traci, and traciVehicle are already initialized by DemoBaseApplLayer
         if (mobility && traci && traciVehicle) {
             scheduleAt(simTime() + decisionInterval, decisionTimer);
+            scheduleAt(simTime() + letCalcInterval, letTimer);
             EV_INFO << "Decision timer scheduled for vehicle " << myId << endl;
         }
         else {
@@ -83,6 +115,24 @@ void MyVeinsApp::finish()
     if (decisionTimer) {
         cancelAndDelete(decisionTimer);
         decisionTimer = nullptr;
+    }
+    if (letTimer) {
+        cancelAndDelete(letTimer);
+        letTimer = nullptr;
+    }
+    if (pbftTimer) {
+        cancelAndDelete(pbftTimer);
+        pbftTimer = nullptr;
+    }
+
+    // Close Socket
+    if (udpSocket >= 0) {
+#ifdef _WIN32
+        closesocket(udpSocket);
+        WSACleanup();
+#else
+        close(udpSocket);
+#endif
     }
     
     // Record final statistics
@@ -130,7 +180,9 @@ void MyVeinsApp::onBSM(DemoSafetyMessage* bsm)
         LAddress::L2Type pseudoAddr = static_cast<LAddress::L2Type>(
             std::hash<double>{}(senderPos.x + senderPos.y * 1000.0)
         );
-        neighbors.emplace_back(pseudoAddr, senderPos, senderSpeed, currentTime);
+        NeighborInfo newNode(pseudoAddr, senderPos, senderSpeed, currentTime);
+        newNode.heading = Coord(cos(bsm->getSenderPos().z), sin(bsm->getSenderPos().z)); // Rough approximation if angle is in Z or extract heading
+        neighbors.push_back(newNode);
         EV_DEBUG << "Added new neighbor at position " << senderPos << endl;
     }
     
@@ -171,6 +223,15 @@ void MyVeinsApp::handleSelfMsg(cMessage* msg)
         
         // Reschedule for next decision
         scheduleAt(simTime() + decisionInterval, decisionTimer);
+    }
+    else if (msg == letTimer) {
+        // Periodic LET and Clustering step
+        updateLETAndClustering();
+        scheduleAt(simTime() + letCalcInterval, letTimer);
+    }
+    else if (msg == pbftTimer) {
+        // PBFT state machine engine
+        stepPBFT();
     }
     else {
         // Let base class handle other self-messages (e.g., beacon timer)
@@ -488,4 +549,156 @@ std::string MyVeinsApp::actionToString(VehicleAction a) const
         case VehicleAction::ACCELERATE: return "ACCELERATE";
         default: return "UNKNOWN";
     }
+}
+
+// ========== PBFT & LET Core Functions ==========
+
+double MyVeinsApp::calculateLET(Coord pos1, Coord spd1, Coord pos2, Coord spd2, double R) {
+    // Math logic based on requirement
+    // Coordinates: (x_i, y_i) vs (x_j, y_j)
+    // Speeds vectors: (v_ix, v_iy) vs (v_jx, v_jy)
+    
+    double dx = pos1.x - pos2.x;
+    double dy = pos1.y - pos2.y;
+    double dvx = spd1.x - spd2.x; // Assumes spd contains the vector x/y
+    double dvy = spd1.y - spd2.y;
+    
+    double a = dvx * dvx + dvy * dvy;
+    double b = 2 * (dx * dvx + dy * dvy);
+    double c = dx * dx + dy * dy - R * R;
+    
+    if (a == 0 && b == 0) return 9999.0; // Parallel and same speed
+    
+    double term = b * b - 4 * a * c;
+    if (term < 0) return 0.0;
+    
+    double LET = (sqrt(term) - b) / (2 * a);
+    return std::max(0.0, LET);
+}
+
+void MyVeinsApp::updateLETAndClustering() {
+    if (neighbors.empty()) return;
+
+    double totalLET = 0.0;
+    int count = 0;
+    
+    // Calculate LET to all active neighbors within communication radius
+    for (const auto& neighbor : neighbors) {
+        double dist = curPosition.distance(neighbor.position);
+        if (dist <= communicationRadius) {
+            double let = calculateLET(curPosition, mobility->getSpeed() * Coord(cos(mobility->getAngleRad()), sin(mobility->getAngleRad())),
+                                       neighbor.position, neighbor.speed, communicationRadius);
+            
+            // Normalize LET to 0-100 for score mapping (heuristic max LET = 20s)
+            double letNorm = std::min(100.0, (let / 20.0) * 100.0);
+            letScores[neighbor.idStr] = letNorm;
+            totalLET += letNorm;
+            count++;
+        }
+    }
+
+    if (count > 0) {
+        topologyStabilityScore = totalLET / count;
+    }
+
+    // Role Election (Cluster Head selection)
+    // In a distributed system, this requires exchanging LET scores, for this prototype
+    // we assume self-promotion if topologyScore > 80 as a simplified proxy, or Primary directs it.
+    if (topologyStabilityScore > 80 && nodeState != NodeState::MALICIOUS) {
+        nodeRole = NodeRole::CLUSTER_HEAD;
+        if (primaryNodeId == "") {
+            primaryNodeId = "veh" + std::to_string(myId); // Self elect for demo purposes
+        }
+    } else {
+        nodeRole = NodeRole::REPLICA;
+    }
+    
+    // Check if view change is needed
+    checkViewChange();
+}
+
+double MyVeinsApp::calculateQueueWeight() {
+    double qLength = neighbors.size(); // Simplified queue length based on nearby vehicles
+    double tWait = (simTime() - waitingStartTime).dbl();
+    double alpha = 0.7;
+    double beta = 0.3;
+    
+    return alpha * qLength + beta * tWait;
+}
+
+void MyVeinsApp::checkViewChange() {
+    // If we believe we are the primary, and we passed the intersection, relinquish primary
+    if (primaryNodeId == "veh" + std::to_string(myId) && calculateDistanceToStopLine() < -intersectionRadius) {
+        primaryNodeId = "";
+        pbftPhase = PBFTPhase::IDLE;
+        
+        json payload;
+        payload["type"] = "view_change";
+        payload["vehicle"] = "veh" + std::to_string(myId);
+        sendDataToPythonBridge(payload);
+    }
+}
+
+void MyVeinsApp::stepPBFT() {
+    // Minimal mock-up of PBFT state transitions
+    if (pbftPhase == PBFTPhase::IDLE) {
+        if (nodeRole == NodeRole::CLUSTER_HEAD && state == VehicleState::WAITING) {
+            pbftPhaseStartTime = simTime();
+            pbftPhase = PBFTPhase::PRE_PREPARE;
+            // Determine proposal dir based on where we are
+            // A simple approximation: if x is dominant -> E/W, if y -> N/S
+            if (std::abs(intersectionCenter.x - curPosition.x) > std::abs(intersectionCenter.y - curPosition.y)) {
+                currentProposalDir = (curPosition.x < intersectionCenter.x) ? "E" : "W";
+            } else {
+                currentProposalDir = (curPosition.y < intersectionCenter.y) ? "N" : "S";
+            }
+            scheduleAt(simTime() + 0.1, pbftTimer); // Transit immediately
+        }
+    } else if (pbftPhase == PBFTPhase::PRE_PREPARE) {
+        pbftPhase = PBFTPhase::PREPARE;
+        scheduleAt(simTime() + 0.2, pbftTimer);
+    } else if (pbftPhase == PBFTPhase::PREPARE) {
+        // Collect votes
+        // Simulate Byzantine nodes voting wrong direction
+        pbftPhase = PBFTPhase::COMMIT;
+        scheduleAt(simTime() + 0.2, pbftTimer);
+    } else if (pbftPhase == PBFTPhase::COMMIT) {
+        decisionLatencyMs = simTime() - pbftPhaseStartTime;
+        pbftPhase = PBFTPhase::REPLY;
+        scheduleAt(simTime() + 0.1, pbftTimer);
+        
+        // Push Metrics & Signal Traffic Light via UDP
+        json payload;
+        payload["step"] = simTime().dbl();
+        payload["consensus"]["phase"] = "commit";
+        payload["consensus"]["proposal_dir"] = currentProposalDir;
+        payload["consensus"]["metrics"]["decision_latency_ms"] = decisionLatencyMs.dbl() * 1000;
+        payload["consensus"]["metrics"]["topology_stability_score"] = topologyStabilityScore;
+        payload["consensus"]["metrics"]["throughput_gain_pct"] = expectedThroughputGainPct;
+        
+        json nodeData;
+        nodeData["id"] = "veh" + std::to_string(myId);
+        nodeData["role"] = (nodeRole == NodeRole::CLUSTER_HEAD) ? "cluster_head" : "replica";
+        nodeData["state"] = (nodeState == NodeState::MALICIOUS) ? "malicious" : "honest";
+        nodeData["vote"] = currentProposalDir;
+        payload["consensus"]["nodes"] = json::array({nodeData});
+        
+        sendDataToPythonBridge(payload);
+        
+    } else if (pbftPhase == PBFTPhase::REPLY) {
+        // Done with this round
+        pbftPhase = PBFTPhase::IDLE;
+        
+        json payload;
+        payload["step"] = simTime().dbl();
+        payload["consensus"]["phase"] = "idle";
+        sendDataToPythonBridge(payload);
+    }
+}
+
+void MyVeinsApp::sendDataToPythonBridge(json payload) {
+    if (udpSocket < 0) return;
+    
+    std::string msg = payload.dump();
+    sendto(udpSocket, msg.c_str(), msg.length(), 0, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
 }
