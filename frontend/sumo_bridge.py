@@ -199,12 +199,43 @@ async def main():
     )
     args = parser.parse_args()
 
-    binary_name = "sumo-gui" if args.gui else "sumo"
-    sumo_binary = checkBinary(binary_name)
-
-    # Launch SUMO with TraCI interface enabled
-    # Let TraCI choose a free port (avoids relying on missing constants).
-    traci.start([sumo_binary, "-c", args.config, "--start"])
+    import time
+    import psutil
+    
+    print("Waiting for OMNeT++ (via sumo-launchd.py) to launch SUMO and expose the TraCI port...")
+    connected = False
+    sumo_port = None
+    
+    while not connected:
+        # Scan for sumo or sumo-gui processes
+        for proc in psutil.process_iter(['name', 'cmdline']):
+            try:
+                name = proc.info.get('name', '').lower()
+                cmd = proc.info.get('cmdline') or []
+                
+                if 'sumo' in name:
+                    # Look for the port argument (usually -remote-port or --remote-port)
+                    for i, arg in enumerate(cmd):
+                        if (arg == '--remote-port' or arg == '-remote-port') and i + 1 < len(cmd):
+                            sumo_port = int(cmd[i+1])
+                            break
+                    if sumo_port:
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+                
+        if sumo_port:
+            try:
+                # Try to connect to the discovered port (sumo-launchd uses the local loopback)
+                traci.init(port=sumo_port, host="127.0.0.1", numClients=2, label="bridge")
+                traci.setOrder(2)
+                connected = True
+                print(f"✅ Successfully attached to SUMO TraCI on port {sumo_port} as Client #2")
+            except Exception as e:
+                # Mismatch or SUMO not fully ready, sleep and retry
+                time.sleep(1)
+        else:
+            time.sleep(1)
 
     clients: set[asyncio.Queue[str]] = set()
 
